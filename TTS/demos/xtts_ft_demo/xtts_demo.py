@@ -1,3 +1,4 @@
+import logging
 import argparse
 import os
 import sys
@@ -23,7 +24,10 @@ def clear_gpu_cache():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+
 XTTS_MODEL = None
+
+
 def load_model(xtts_checkpoint, xtts_config, xtts_vocab):
     global XTTS_MODEL
     clear_gpu_cache()
@@ -33,24 +37,27 @@ def load_model(xtts_checkpoint, xtts_config, xtts_vocab):
     config.load_json(xtts_config)
     XTTS_MODEL = Xtts.init_from_config(config)
     print("Loading XTTS model! ")
-    XTTS_MODEL.load_checkpoint(config, checkpoint_path=xtts_checkpoint, vocab_path=xtts_vocab, use_deepspeed=False)
+    XTTS_MODEL.load_checkpoint(
+        config, checkpoint_path=xtts_checkpoint, vocab_path=xtts_vocab, use_deepspeed=False)
     if torch.cuda.is_available():
         XTTS_MODEL.cuda()
 
     print("Model Loaded!")
     return "Model Loaded!"
 
+
 def run_tts(lang, tts_text, speaker_audio_file):
     if XTTS_MODEL is None or not speaker_audio_file:
         return "You need to run the previous step to load the model !!", None, None
 
-    gpt_cond_latent, speaker_embedding = XTTS_MODEL.get_conditioning_latents(audio_path=speaker_audio_file, gpt_cond_len=XTTS_MODEL.config.gpt_cond_len, max_ref_length=XTTS_MODEL.config.max_ref_len, sound_norm_refs=XTTS_MODEL.config.sound_norm_refs)
+    gpt_cond_latent, speaker_embedding = XTTS_MODEL.get_conditioning_latents(
+        audio_path=speaker_audio_file, gpt_cond_len=XTTS_MODEL.config.gpt_cond_len, max_ref_length=XTTS_MODEL.config.max_ref_len, sound_norm_refs=XTTS_MODEL.config.sound_norm_refs)
     out = XTTS_MODEL.inference(
         text=tts_text,
         language=lang,
         gpt_cond_latent=gpt_cond_latent,
         speaker_embedding=speaker_embedding,
-        temperature=XTTS_MODEL.config.temperature, # Add custom parameters here
+        temperature=XTTS_MODEL.config.temperature,  # Add custom parameters here
         length_penalty=XTTS_MODEL.config.length_penalty,
         repetition_penalty=XTTS_MODEL.config.repetition_penalty,
         top_k=XTTS_MODEL.config.top_k,
@@ -65,9 +72,7 @@ def run_tts(lang, tts_text, speaker_audio_file):
     return "Speech generated !", out_path, speaker_audio_file
 
 
-
-
-# define a logger to redirect 
+# define a logger to redirect
 class Logger:
     def __init__(self, filename="log.out"):
         self.log_file = filename
@@ -85,13 +90,13 @@ class Logger:
     def isatty(self):
         return False
 
+
 # redirect stdout and stderr to a file
 sys.stdout = Logger()
 sys.stderr = sys.stdout
 
 
 # logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-import logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -99,6 +104,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
+
 
 def read_logs():
     sys.stdout.flush()
@@ -203,7 +209,7 @@ if __name__ == "__main__":
             demo.load(read_logs, None, logs, every=1)
 
             prompt_compute_btn = gr.Button(value="Step 1 - Create dataset")
-        
+
             def preprocess_dataset(audio_path, language, out_path, progress=gr.Progress(track_tqdm=True)):
                 clear_gpu_cache()
                 out_path = os.path.join(out_path, "dataset")
@@ -212,7 +218,85 @@ if __name__ == "__main__":
                     return "You should provide one or multiple audio files! If you provided it, probably the upload of the files is not finished yet!", "", ""
                 else:
                     try:
-                        train_meta, eval_meta, audio_total_size = format_audio_list(audio_path, target_language=language, out_path=out_path, gradio_progress=progress)
+                        train_meta, eval_meta, audio_total_size = format_audio_list(
+                            audio_path, target_language=language, out_path=out_path, gradio_progress=progress)
+                    except:
+                        traceback.print_exc()
+                        error = traceback.format_exc()
+                        return f"The data processing was interrupted due an error !! Please check the console to verify the full error message! \n Error summary: {error}", "", ""
+
+                clear_gpu_cache()
+
+                # if audio total len is less than 2 minutes raise an error
+                if audio_total_size < 120:
+                    message = "The sum of the duration of the audios that you provided should be at least 2 minutes!"
+                    print(message)
+                    return message, "", ""
+
+                print("Dataset Processed!")
+                return "Dataset Processed!", train_meta, eval_meta
+
+        with gr.Tab("Local - Data processing"):
+            input_path = gr.Textbox(
+                label="Input path (where data will be retrieved):",
+                value=args.out_path,
+            )
+
+            out_path = gr.Textbox(
+                label="Output path (where data and checkpoints will be saved):",
+                value=args.out_path,
+            )
+
+            lang = gr.Dropdown(
+                label="Dataset Language",
+                value="en",
+                choices=[
+                    "en",
+                    "es",
+                    "fr",
+                    "de",
+                    "it",
+                    "pt",
+                    "pl",
+                    "tr",
+                    "ru",
+                    "nl",
+                    "cs",
+                    "ar",
+                    "zh",
+                    "hu",
+                    "ko",
+                    "ja"
+                ],
+            )
+
+            progress_data = gr.Label(
+                label="Progress:"
+            )
+
+            logs = gr.Textbox(
+                label="Logs:",
+                interactive=False,
+            )
+            demo.load(read_logs, None, logs, every=1)
+
+            local_prompt_compute_btn = gr.Button(value="Create dataset")
+
+            def preprocess_local_dataset(input_path, language, out_path, progress=gr.Progress(track_tqdm=True)):
+                clear_gpu_cache()
+                out_path = os.path.join(out_path, "dataset")
+                os.makedirs(out_path, exist_ok=True)
+                if input_path is None:
+                    return "You should provide one or multiple audio files! If you provided it, probably the upload of the files is not finished yet!", "", ""
+                else:
+                    audio_path = []
+                    for (dirpath, dirnames, filenames) in os.walk(input_path):
+                        for filename in filenames:
+                            audio_path.append(input_path+'/'+filename)
+                        break
+                    try:
+                        train_meta, eval_meta, audio_total_size = format_audio_list(
+                            audio_path, target_language=language, out_path=out_path, gradio_progress=progress)
                     except:
                         traceback.print_exc()
                         error = traceback.format_exc()
@@ -236,7 +320,7 @@ if __name__ == "__main__":
             eval_csv = gr.Textbox(
                 label="Eval CSV:",
             )
-            num_epochs =  gr.Slider(
+            num_epochs = gr.Slider(
                 label="Number of epochs:",
                 minimum=1,
                 maximum=100,
@@ -281,7 +365,8 @@ if __name__ == "__main__":
                 try:
                     # convert seconds to waveform frames
                     max_audio_length = int(max_audio_length * 22050)
-                    config_path, original_xtts_checkpoint, vocab_file, exp_path, speaker_wav = train_gpt(language, num_epochs, batch_size, grad_acumm, train_csv, eval_csv, output_path=output_path, max_audio_length=max_audio_length)
+                    config_path, original_xtts_checkpoint, vocab_file, exp_path, speaker_wav = train_gpt(
+                        language, num_epochs, batch_size, grad_acumm, train_csv, eval_csv, output_path=output_path, max_audio_length=max_audio_length)
                 except:
                     traceback.print_exc()
                     error = traceback.format_exc()
@@ -315,7 +400,8 @@ if __name__ == "__main__":
                     progress_load = gr.Label(
                         label="Progress:"
                     )
-                    load_btn = gr.Button(value="Step 3 - Load Fine-tuned XTTS model")
+                    load_btn = gr.Button(
+                        value="Step 3 - Load Fine-tuned XTTS model")
 
                 with gr.Column() as col2:
                     speaker_reference_audio = gr.Textbox(
@@ -357,6 +443,20 @@ if __name__ == "__main__":
                     tts_output_audio = gr.Audio(label="Generated Audio.")
                     reference_audio = gr.Audio(label="Reference audio used.")
 
+            local_prompt_compute_btn.click(
+                fn=preprocess_local_dataset,
+                inputs=[
+                    input_path,
+                    lang,
+                    out_path,
+                ],
+                outputs=[
+                    progress_data,
+                    train_csv,
+                    eval_csv,
+                ],
+            )
+
             prompt_compute_btn.click(
                 fn=preprocess_dataset,
                 inputs=[
@@ -371,7 +471,6 @@ if __name__ == "__main__":
                 ],
             )
 
-
             train_btn.click(
                 fn=train_model,
                 inputs=[
@@ -384,9 +483,10 @@ if __name__ == "__main__":
                     out_path,
                     max_audio_length,
                 ],
-                outputs=[progress_train, xtts_config, xtts_vocab, xtts_checkpoint, speaker_reference_audio],
+                outputs=[progress_train, xtts_config, xtts_vocab,
+                         xtts_checkpoint, speaker_reference_audio],
             )
-            
+
             load_btn.click(
                 fn=load_model,
                 inputs=[
